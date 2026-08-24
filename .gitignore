@@ -1,0 +1,24 @@
+# Build directories
+/build/
+/cmake-build-*/
+/out/
+/_install/
+/downstream/build/
+
+# Temporary validation artifacts
+/cudacheck.*
+/dyntest.*
+/cuda_pressure.exe
+/cuda_pressure.lib
+/cuda_pressure.exp
+/build_cudacheck.bat
+/build_dyntest.bat
+/build_cuda_pressure.bat
+/*.pyc
+
+# Editor/OS
+/.vs/
+*.user
+*.suo
+.DS_Store
+Thumbs.db

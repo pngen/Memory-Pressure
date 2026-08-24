@@ -1,0 +1,6 @@
+@PACKAGE_INIT@
+
+include("${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/cmake/MemoryPressure/MemoryPressureTargets.cmake")
+set(MemoryPressure_VERSION "@PROJECT_VERSION@")
+set(MEMORY_PRESSURE_VERSION_STRING "@PROJECT_VERSION@")
+check_required_components(MemoryPressure)

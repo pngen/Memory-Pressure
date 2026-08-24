@@ -1,0 +1,19 @@
+#include <iostream>
+#include "memory_pressure/runtime.h"
+#include "memory_pressure/providers/synthetic.h"
+using namespace memory_pressure;
+int main() {
+    PressureRuntime rt;
+    std::vector<SyntheticDomainSpec> ds;
+    SyntheticDomainSpec d; d.id = PressureDomainId{7,1}; d.type = DomainType::AcceleratorMemory; d.group = "gpu"; d.total_capacity = 4ULL*1024*1024*1024; ds.push_back(d);
+    rt.register_provider(std::make_shared<SyntheticProvider>(std::move(ds), SyntheticScenario::RapidSpike, 100, 4));
+    Budget b; b.hard_capacity = 256ULL*1024*1024; rt.set_budget(d.id, b);
+    std::cout << "rapid-spike:" << std::endl;
+    for (int i = 0; i < 20; ++i) {
+        auto sn = rt.refresh(1000 + i*100);
+        const DomainState* st = sn->find_domain(d.id);
+        std::cout << "  t=" << i << " util=" << (st ? st->utilization : 0.0)
+                  << " level=" << (st ? to_string(st->level) : "none") << std::endl;
+    }
+    return 0;
+}
