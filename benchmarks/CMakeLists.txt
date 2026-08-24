@@ -1,0 +1,4 @@
+# Memory Pressure benchmarks.
+add_executable(memory_pressure_benchmark benchmark.cpp)
+target_link_libraries(memory_pressure_benchmark PRIVATE MemoryPressure::memory_pressure)
+target_compile_features(memory_pressure_benchmark PRIVATE cxx_std_20)
