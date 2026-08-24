@@ -39,12 +39,12 @@ identity** (for example the CUDA device UUID, or a fixed resource tag). In-tree
 providers follow this rule:
 
 - `WindowsHostProvider` builds ids as
-  `PressureDomainId{0x77696E64, fnv1a(\"windows::\" + tag)}`.
+  `PressureDomainId{0x77696E64, fnv1a("windows::" + tag)}`.
 - `CudaDeviceProvider` builds ids from the device UUID when available, else
-  `PressureDomainId{0x63756461, fnv1a(name + \"#\" + ordinal)}` (a UUID-less
+  `PressureDomainId{0x63756461, fnv1a(name + "#" + ordinal)}` (a UUID-less
   fallback that is still stable for a given name/ordinal pair).
 - `StorageProvider` builds ids as
-  `PressureDomainId{0x73746F72, fnv1a(\"storage::\" + path)}`.
+  `PressureDomainId{0x73746F72, fnv1a("storage::" + path)}`.
 
 ## DomainType: economics, not provider
 

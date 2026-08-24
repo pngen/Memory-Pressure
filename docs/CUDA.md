@@ -1,6 +1,6 @@
 # CUDA device provider
 
-`CudaDeviceProvider` (`name() == \"cuda.driver\"`) reports one `ACCELERATOR_MEMORY` domain per NVIDIA accelerator. It is defined in `include/memory_pressure/providers/cuda.h` and implemented in `src/providers/cuda.cpp`. It keeps the core library buildable on CPU-only systems by loading NVIDIA libraries `dynamically`.
+`CudaDeviceProvider` (`name() == "cuda.driver"`) reports one `ACCELERATOR_MEMORY` domain per NVIDIA accelerator. It is defined in `include/memory_pressure/providers/cuda.h` and implemented in `src/providers/cuda.cpp`. It keeps the core library buildable on CPU-only systems by loading NVIDIA libraries `dynamically`.
 
 ## Dynamic loading
 
@@ -29,9 +29,9 @@ The provider uses the `runtime` API (`cudaMemGetInfo`), `not` the driver API (`c
 
 > The runtime reports authoritative per-device totals on WDDM where the driver `cuMemGetInfo` may be capped.
 
-On Windows Display Driver Model (WDDM) systems, a driver-level query like `cuMemGetInfo` can be `capped` to the current virtual (primary/child) context's view rather than the whole device. The runtime's `cudaMemGetInfo` returns the full device total, so the provider prefers it and stamps the observation with the `CudaDriverApi` provenance (the CUDA runtime API is part of the driver stack on NVIDIA).
+On Windows Display Driver Model (WDDM) systems, a driver-level query like `cuMemGetInfo` can be `capped` to the current virtual (primary/child) context's view rather than the whole device. The runtime's `cudaMemGetInfo` returns the full device total, so the provider prefers it and stamps the observation with `CudaRuntimeApi` provenance (the CUDA runtime API is part of the driver stack on NVIDIA).
 
-In `sample()`, for each device the provider calls `cudaSetDevice(i)` then `cudaMemGetInfo(&freeMem, &totalMem)`. On success it records: total = `totalMem`, committed = `totalMem - freeMem`, resident = committed, available = `freeMem`, confidence = `High`, provenance = `CudaDriverApi`, validity = `Valid`. On failure it keeps the identity but sets confidence = `Unknown`, validity = `Failed`, and marks the provider `Partial`.
+In `sample()`, for each device the provider calls `cudaSetDevice(i)` then `cudaMemGetInfo(&freeMem, &totalMem)`. On success it records: total = `totalMem`, committed = `totalMem - freeMem`, resident = committed, available = `freeMem`, confidence = `High`, provenance = `CudaRuntimeApi`, validity = `Valid`. On failure it keeps the identity but sets confidence = `Unknown`, validity = `Failed`, and marks the provider `Partial`.
 
 ## Device identity and UUID
 
@@ -49,7 +49,7 @@ PressureDomainId DeviceDomainId(const unsigned char* uuid, bool have_uuid,
 }
 ```
 
-The native resource id is `uuid_hex + \"|\" + deviceName`, so the display string includes both the UUID (where available) and the device name. When a UUID is unavailable the fallback prefix `0x63756461` (the bytes of `\"cuda\"`) keeps the identity distinct from other providers.
+The native resource id is `uuid_hex + "|" + deviceName`, so the display string includes both the UUID (where available) and the device name. When a UUID is unavailable the fallback prefix `0x63756461` (the bytes of `"cuda"`) keeps the identity distinct from other providers.
 
 ## Allocation probes
 
