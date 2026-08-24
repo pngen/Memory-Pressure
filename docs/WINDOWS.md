@@ -1,6 +1,6 @@
 # Windows host provider
 
-`WindowsHostProvider` (`name() == \"windows\"`) observes host memory from native Windows APIs. It is defined in `include/memory_pressure/providers/windows.h` and implemented in `src/providers/windows.cpp`. It produces three pressure domains and stamps each observation with provenance and confidence.
+`WindowsHostProvider` (`name() == "windows"`) observes host memory from native Windows APIs. It is defined in `include/memory_pressure/providers/windows.h` and implemented in `src/providers/windows.cpp`. It produces three pressure domains and stamps each observation with provenance and confidence.
 
 | Domain | `DomainType` | Native API | `Provenance` | `Confidence` |
 |--------|--------------|------------|--------------|--------------|
@@ -14,13 +14,13 @@ Each domain gets a stable identity derived from a fixed tag, combining a stable 
 
 ```cpp
 PressureDomainId make_id(const char* tag) {
-    const std::uint64_t h = PressureDomainId::fnv1a(\"windows::\" + std::string(tag));
+    const std::uint64_t h = PressureDomainId::fnv1a("windows::" + std::string(tag));
     return PressureDomainId{0x77696E64ULL, h};
 }
-// tags: \"host-memory\", \"system-commit\", \"process-commit\"
+// tags: "host-memory", "system-commit", "process-commit"
 ```
 
-The `0x77696E64` prefix (the bytes of `\"wind\"`) keeps Windows identities distinct from those of other providers. Using a tag, not a transient handle, means the identity survives across refreshes and processes.
+The `0x77696E64` prefix (the bytes of `"wind"`) keeps Windows identities distinct from those of other providers. Using a tag, not a transient handle, means the identity survives across refreshes and processes.
 
 ## Native APIs
 
