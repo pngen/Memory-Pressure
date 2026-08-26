@@ -1,0 +1,18 @@
+Memory Pressure
+
+Copyright © Summon Software Labs
+
+Memory Pressure is an open-source, vendor-neutral runtime for detecting,
+modeling, and governing memory pressure across heterogeneous AI
+infrastructure.
+
+This product is licensed under the Apache License, Version 2.0. See the
+LICENSE file in this distribution for the full license text.
+
+Memory Pressure does not collect or transmit any telemetry. All telemetry is
+written to local files chosen by the operator and never leaves the machine
+running the software.
+
+Memory Pressure accepts contributions from individuals and organizations on
+the terms of the Apache License 2.0 without requiring a Contributor License
+Agreement (CLA). See CONTRIBUTING.md for contribution guidance.
