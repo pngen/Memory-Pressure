@@ -135,3 +135,7 @@ Where those fabrics exist, Memory Pressure is a consumer of nothing but its own 
 - `docs/PROVIDERS.md`, `docs/WINDOWS.md`, `docs/CUDA.md` -- providers and extension seams.
 - `docs/SERIALIZATION.md`, `docs/TESTING.md`, `docs/BENCHMARKS.md` -- persistence, correctness, and methodology.
 - `docs/INTEROP.md`, `docs/SECURITY.md`, `docs/LIMITATIONS.md` -- boundaries, hardening, and honest limitations.
+
+## License
+
+Apache License 2.0. Copyright 2026 Summon Software Labs. No telemetry transmission.
