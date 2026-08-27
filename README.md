@@ -123,7 +123,6 @@ Memory Pressure is a **sensing and signaling** runtime, not an actuator. It does
 | Transfer Fabric | `RequestDemotion`, transfer-staging reserve awareness | it moves no bytes |
 | Topology Fabric | `TierRole` for aggregation & demotion feasibility | it does not own topology |
 | Compute Fabric | per-domain accelerator pressure, `Backpressure` | it does not schedule work |
-| Admission/Quota/Bandwidth fabrics (future) | `AdmissionHint`, `Backpressure`, budgets/reserves | it does not enforce quotas or admission |
 
 Where those fabrics exist, Memory Pressure is a consumer of nothing but its own configuration and a producer of pressure signals.
 
