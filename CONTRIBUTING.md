@@ -32,7 +32,6 @@ infrastructure.
 
 ## Testing requirements
 
-- No test timeouts. Do not hide a hang behind a watchdog.
 - Property tests must log the failing seed.
 - Real-hardware tests must use governed budgets below physical capacity.
 
