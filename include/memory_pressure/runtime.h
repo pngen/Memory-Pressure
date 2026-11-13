@@ -121,6 +121,7 @@ private:
 
     mutable std::mutex refresh_mutex_;
     mutable std::mutex current_mutex_;       // guards current_snapshot_
+    mutable std::mutex policy_mutex_;        // guards policy_ (the pointer; a policy itself is immutable)
     std::shared_ptr<const PressurePolicy> policy_;
     std::shared_ptr<const Snapshot> current_snapshot_;
 

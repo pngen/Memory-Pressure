@@ -87,8 +87,11 @@ struct Budget {
 
     // Total bytes held aside by explicit reserves.
     std::uint64_t reserve_bytes() const noexcept {
+        // Saturating: reserves that add up past the representable range are
+        // more than any capacity, never a small number that wrapped around.
+        const std::uint64_t limit = ~std::uint64_t{0};
         std::uint64_t total = emergency_reserve_bytes;
-        for (const auto& r : reserves) total += r.bytes;
+        for (const auto& r : reserves) total = (r.bytes > limit - total) ? limit : total + r.bytes;
         return total;
     }
 

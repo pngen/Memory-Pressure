@@ -104,3 +104,54 @@ TEST(concurrency_subscription_storm_while_transitioning) {
     for (auto& t : subs) t.join();
     EXPECT(true);
 }
+
+TEST(concurrency_policy_pointer_is_shared_safely) {
+    // Readers copy the policy pointer while it is being replaced.  Every copy
+    // has to be a whole, live policy.
+    PressureRuntime rt;
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint64_t> seen{0};
+    std::vector<std::thread> readers;
+    for (int r = 0; r < 4; ++r) {
+        readers.emplace_back([&]() {
+            while (!stop.load()) {
+                auto pol = rt.current_policy();
+                if (pol && pol->version >= 1 && pol->name == "default") seen.fetch_add(1);
+            }
+        });
+    }
+    for (int i = 0; i < 50000; ++i) {
+        PressurePolicy p = default_policy();
+        p.version = 1 + static_cast<std::uint64_t>(i % 5);
+        rt.set_policy(std::move(p));
+    }
+    stop.store(true);
+    for (auto& t : readers) t.join();
+    EXPECT(seen.load() > 0);
+    EXPECT(rt.current_policy() != nullptr);
+}
+
+TEST(callbacks_run_outside_runtime_locks) {
+    // An event callback may call back into the runtime.  set_policy takes the
+    // runtime's own locks, so this only returns if none of them is held while
+    // the callback runs.
+    const PressureDomainId id{4, 0};
+    PressureRuntime rt;
+    std::vector<SyntheticDomainSpec> ds;
+    SyntheticDomainSpec d; d.id = id; d.type = DomainType::AcceleratorMemory; d.group = "gpu"; d.total_capacity = 4ULL*1024*1024*1024; ds.push_back(d);
+    rt.register_provider(std::make_shared<SyntheticProvider>(std::move(ds), SyntheticScenario::GradualGrowth, 100, 4));
+    std::atomic<int> calls{0};
+    std::atomic<int> applied{0};
+    auto sub = rt.subscribe(SubscriptionFilter{}, [&](const PressureEvent&) {
+        if (calls.fetch_add(1) != 0) return;          // re-enter once
+        PressurePolicy p = default_policy();
+        p.version = 7;
+        if (!rt.set_policy(p).has_value()) applied.fetch_add(1);
+        (void)rt.admit(id, 1);
+    });
+    rt.refresh(1000);
+    EXPECT(calls.load() > 0);
+    EXPECT(applied.load() == 1);
+    EXPECT(rt.current_policy()->version == 7);
+    rt.close_subscription(sub);
+}

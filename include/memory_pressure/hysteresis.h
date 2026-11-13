@@ -30,6 +30,9 @@ public:
     bool in_hold() const noexcept { return pending_ != PressureLevel::Unknown; }
     std::uint32_t pending_observations() const noexcept { return pending_obs_; }
     void reset() noexcept;
+    // Adopt a new configuration.  The resolved level is kept (a change of
+    // configuration is not an observation); a pending transition starts over.
+    void reconfigure(const HysteresisConfig& cfg) noexcept;
 
 private:
     HysteresisConfig cfg_;

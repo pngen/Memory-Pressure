@@ -129,6 +129,17 @@ std::optional<std::string> validate_policy(const PressurePolicy& p) noexcept {
     if (p.hysteresis.min_dwell_observations == 0) {
         return "min_dwell_observations must be positive";
     }
+    // Confirmations are counted up to max_debounce_observations and no
+    // further, so a dwell above that cap could never be met: no domain would
+    // ever change level under such a policy.
+    if (p.hysteresis.max_debounce_observations < p.hysteresis.min_dwell_observations) {
+        return "max_debounce_observations is below min_dwell_observations (no transition could ever be confirmed)";
+    }
+    auto duration_ok = [](double v) { return std::isfinite(v) && v >= 0.0; };
+    if (!duration_ok(p.hysteresis.min_dwell_duration_ms) || !duration_ok(p.hysteresis.escalation_delay_ms) ||
+        !duration_ok(p.hysteresis.recovery_delay_ms)) {
+        return "hysteresis durations must be finite and non-negative";
+    }
     return std::nullopt;
 }
 
@@ -169,7 +180,7 @@ PressureScore score_domain(double utilization, bool governed, double free_fracti
     s.free_deficit_component = clamp01(1.0 - free_fraction);
     s.reserve_deficit_component = clamp01(reserve_deficit_fraction);
     s.growth_component = clamp01(growth_factor);
-    const double af = std::min(1.0, static_cast<double>(allocation_failures) / 5.0);
+    const double af = clamp01(static_cast<double>(allocation_failures) / 5.0);   // a negative count is no credit
     s.allocation_failure_component = af;
     s.confidence_penalty = confidence_penalty(confidence);
     s.stale_penalty = validity_penalty(validity);
@@ -321,6 +332,12 @@ PressureLevel HysteresisState::update(PressureLevel raw, std::uint64_t now_ms) {
 
 void HysteresisState::reset() noexcept {
     level_ = PressureLevel::Normal;
+    pending_ = PressureLevel::Unknown;
+    pending_obs_ = 0;
+}
+
+void HysteresisState::reconfigure(const HysteresisConfig& cfg) noexcept {
+    cfg_ = cfg;
     pending_ = PressureLevel::Unknown;
     pending_obs_ = 0;
 }

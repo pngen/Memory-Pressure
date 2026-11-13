@@ -290,6 +290,7 @@ inline const char* to_string(ProviderStatus v) noexcept {
         case ProviderStatus::Stale:       return "STALE";
         case ProviderStatus::Failed:      return "FAILED";
         case ProviderStatus::Unavailable: return "UNAVAILABLE";
+        case ProviderStatus::Partial:     return "PARTIAL";
     }
     return "UNAVAILABLE";
 }

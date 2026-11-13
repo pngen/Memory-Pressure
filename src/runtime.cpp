@@ -14,8 +14,15 @@ namespace {
 double clamp01(double v) noexcept { if (v < 0.0) return 0.0; if (v > 1.0) return 1.0; return v; }
 
 double utilization_for(std::uint64_t committed, std::uint64_t usable) noexcept {
-    if (usable == 0) return 0.0;
+    // Nothing usable: whatever is committed is already at the ceiling.  (With
+    // nothing committed either there is no evidence of pressure.)
+    if (usable == 0) return committed > 0 ? 1.0 : 0.0;
     return static_cast<double>(committed) / static_cast<double>(usable);
+}
+
+std::uint64_t saturating_add(std::uint64_t a, std::uint64_t b) noexcept {
+    const std::uint64_t limit = ~std::uint64_t{0};
+    return b > limit - a ? limit : a + b;
 }
 
 bool is_accelerator(DomainType t) noexcept { return t == DomainType::AcceleratorMemory; }
@@ -36,7 +43,7 @@ TierRole role_for(DomainType t) noexcept {
 std::uint64_t relief_bytes_for(PressureLevel level, const Budget& b) {
     switch (level) {
         case PressureLevel::High:      return b.reclaim_target ? b.reclaim_target : (b.hard_capacity ? b.hard_capacity / 8 : 0);
-        case PressureLevel::Critical:  return b.reclaim_target ? (b.reclaim_target + b.demotion_target) : (b.hard_capacity ? b.hard_capacity / 4 : 0);
+        case PressureLevel::Critical:  return b.reclaim_target ? saturating_add(b.reclaim_target, b.demotion_target) : (b.hard_capacity ? b.hard_capacity / 4 : 0);
         case PressureLevel::Exhausted: return b.demotion_target ? b.demotion_target : (b.hard_capacity ? b.hard_capacity / 2 : 0);
         default: return 0;
     }
@@ -95,16 +102,25 @@ PressureRuntime::~PressureRuntime() {
     for (auto& s : subscriptions_) if (s) s->close();
 }
 
-std::shared_ptr<const PressurePolicy> PressureRuntime::current_policy() const { return policy_; }
+std::shared_ptr<const PressurePolicy> PressureRuntime::current_policy() const {
+    // The policy is immutable, the pointer to it is not: it is read and
+    // replaced from different threads, so both happen under the same lock.
+    std::lock_guard<std::mutex> lk(policy_mutex_);
+    return policy_;
+}
 
 std::optional<std::string> PressureRuntime::set_policy(PressurePolicy p) {
     auto err = validate_policy(p);
     if (err) return err;
+    auto next = std::make_shared<const PressurePolicy>(std::move(p));
     {
         std::lock_guard<std::mutex> rl(refresh_mutex_);
-        for (auto& kv : domain_states_) kv.second.hysteresis = HysteresisState(p.hysteresis);
+        // The debounce configuration changes; what each domain has resolved to
+        // does not.  Replacing the policy must not read as a recovery.
+        for (auto& kv : domain_states_) kv.second.hysteresis.reconfigure(next->hysteresis);
+        std::lock_guard<std::mutex> pl(policy_mutex_);
+        policy_ = std::move(next);
     }
-    policy_ = std::make_shared<const PressurePolicy>(std::move(p));
     {
         std::lock_guard<std::mutex> sl(stats_mutex_);
         ++stats_.policy_changes;
@@ -140,7 +156,11 @@ std::shared_ptr<Subscription> PressureRuntime::subscribe(
 }
 
 void PressureRuntime::close_subscription(const std::shared_ptr<Subscription>& s) {
-    if (s) s->close();
+    if (!s) return;
+    s->close();
+    // A closed subscription is no longer the runtime's to keep.
+    std::lock_guard<std::mutex> lk(registry_mutex_);
+    subscriptions_.erase(std::remove(subscriptions_.begin(), subscriptions_.end(), s), subscriptions_.end());
 }
 
 std::shared_ptr<const Snapshot> PressureRuntime::current_snapshot() const {
@@ -156,8 +176,8 @@ std::shared_ptr<const Snapshot> PressureRuntime::snapshot_by_id(std::uint64_t id
 
 // ---------------------------------------------------------------- refresh ---
 std::shared_ptr<const Snapshot> PressureRuntime::refresh(std::uint64_t now_ms) {
-    std::lock_guard<std::mutex> rl(refresh_mutex_);
-    auto pol = policy_;
+    std::unique_lock<std::mutex> rl(refresh_mutex_);
+    auto pol = current_policy();
 
     const auto start_clock = std::chrono::steady_clock::now();
 
@@ -220,10 +240,45 @@ std::shared_ptr<const Snapshot> PressureRuntime::refresh(std::uint64_t now_ms) {
     std::vector<DomainState> domains;
     std::unordered_set<PressureDomainId, PressureDomainIdHash> observed_ids;
     std::uint64_t obs_count = 0;
+    std::uint64_t stale_count = 0;
 
     for (auto& po : all) {
+        bool provider_marked_stale = false;
         for (auto& obs : po.obs) {
-            observed_ids.insert(obs.id);
+            if (!observed_ids.insert(obs.id).second) {
+                // One domain, one interpretation per cycle.  A second observation
+                // of the same id would step its debounce twice and repeat the
+                // domain in the snapshot.
+                new_snap->warnings.push_back(po.name + " repeated domain " + obs.id.to_hex() + "; ignored");
+                continue;
+            }
+
+            // Policy freshness: data older than the provider's bound is stale,
+            // whatever the provider says about it.  (An unstamped observation
+            // has no age to judge.)
+            if (obs.observed_at_ms != 0 && obs.observed_at_ms < now_ms) {
+                const auto fit = pol->freshness.per_provider_max_age_us.find(po.name);
+                const std::uint64_t max_age_us = fit != pol->freshness.per_provider_max_age_us.end()
+                    ? fit->second : pol->freshness.default_max_age_us;
+                if (now_ms - obs.observed_at_ms > max_age_us / 1000ULL &&
+                    (obs.validity == Validity::Valid || obs.validity == Validity::Partial)) {
+                    obs.validity = Validity::Stale;
+                }
+            }
+            if (obs.validity == Validity::Stale) {
+                ++stale_count;
+                new_snap->stale_data = true;
+                auto hs = health.find(po.name);
+                if (!provider_marked_stale && hs != health.end() &&
+                    (hs->second == ProviderStatus::Healthy || hs->second == ProviderStatus::Partial)) {
+                    hs->second = ProviderStatus::Stale;
+                    pending_events.push_back(make_pressure_event(event_id_, PressureEventType::ProviderStale,
+                        0, now_ms, std::nullopt, po.name + " is stale", 0));
+                    new_snap->warnings.push_back(po.name + " stale");
+                }
+                provider_marked_stale = true;
+            }
+
             auto it = domain_states_.find(obs.id);
             if (it == domain_states_.end()) {
                 it = domain_states_.emplace(obs.id, DomainRuntimeState(pol->hysteresis, 16)).first;
@@ -258,7 +313,7 @@ std::shared_ptr<const Snapshot> PressureRuntime::refresh(std::uint64_t now_ms) {
 
             const std::uint64_t available = usable > obs.committed ? usable - obs.committed : 0;
             const double free_fraction = usable > 0 ? static_cast<double>(available) / static_cast<double>(usable) : 0.0;
-            const double reserve_deficit = (usable > 0 && obs.committed > usable)
+            const double reserve_deficit = (obs.committed > usable)
                 ? clamp01(static_cast<double>(obs.committed - usable) / static_cast<double>(std::max<std::uint64_t>(usable, 1)))
                 : 0.0;
             double growth_factor = 0.0;
@@ -299,6 +354,11 @@ std::shared_ptr<const Snapshot> PressureRuntime::refresh(std::uint64_t now_ms) {
             ds.trend_confidence = te.confidence;
             ds.trend_window_samples = te.samples;
             ds.confidence = obs.confidence;
+            // Evidence that is stale or failed is never better than low confidence.
+            if ((obs.validity == Validity::Stale || obs.validity == Validity::Failed) &&
+                obs.confidence != Confidence::Unknown) {
+                ds.confidence = Confidence::Low;
+            }
             ds.provenance = obs.provenance;
             ds.validity = obs.validity;
             ds.timestamp_ms = now_ms;
@@ -466,11 +526,23 @@ std::shared_ptr<const Snapshot> PressureRuntime::refresh(std::uint64_t now_ms) {
       stats_.refresh_latency_us = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(end_clock - start_clock).count());
       ++stats_.snapshots;
-      stats_.observations += obs_count; }
+      stats_.observations += obs_count;
+      stats_.stale_observations += stale_count; }
+
+    // The snapshot is published; events go out with no runtime lock held, so
+    // a callback may call back into the runtime (set_policy, refresh, admit).
+    rl.unlock();
 
     for (const auto& e : pending_events) {
         std::vector<std::shared_ptr<Subscription>> subs;
-        { std::lock_guard<std::mutex> lk(registry_mutex_); subs = subscriptions_; }
+        {
+            std::lock_guard<std::mutex> lk(registry_mutex_);
+            // Subscriptions that were closed are dropped here, so the list does
+            // not grow with every subscriber that ever existed.
+            subscriptions_.erase(std::remove_if(subscriptions_.begin(), subscriptions_.end(),
+                [](const std::shared_ptr<Subscription>& s) { return !s || s->closed(); }), subscriptions_.end());
+            subs = subscriptions_;
+        }
         for (auto& s : subs) { if (s && !s->closed()) s->push(e); }
     }
 
@@ -557,18 +629,21 @@ DomainResponse PressureRuntime::response_for(const PressureDomainId& id) const {
     dr.level = ds->level;
     dr.actions = ds->responses;
     dr.explanation = ds->explanation;
+    // The policy bounds how much relief a single request may ask for.
+    const auto pol = current_policy();
+    const std::uint64_t relief_cap = pol ? pol->max_relief_bytes : ~std::uint64_t{0};
     for (const ResponseAction a : ds->responses) {
         if (a == ResponseAction::RequestReclaim) {
             ReliefRequest r; r.kind = ReliefRequest::Kind::Reclaim;
             r.domain = id; r.urgency = ds->level; r.generation = snap->generation;
-            r.target_bytes = relief_bytes_for(ds->level, ds->budget);
+            r.target_bytes = std::min(relief_bytes_for(ds->level, ds->budget), relief_cap);
             r.minimum_useful_relief = std::min<std::uint64_t>(r.target_bytes ? r.target_bytes / 2 : 0, std::max<std::uint64_t>(1, ds->committed / 2));
             r.reason = "reclaim " + std::to_string(r.target_bytes) + " bytes";
             dr.relief = r;
         } else if (a == ResponseAction::RequestDemotion) {
             ReliefRequest r; r.kind = ReliefRequest::Kind::Demotion;
             r.domain = id; r.urgency = ds->level; r.generation = snap->generation;
-            r.target_bytes = relief_bytes_for(ds->level, ds->budget);
+            r.target_bytes = std::min(relief_bytes_for(ds->level, ds->budget), relief_cap);
             r.reason = "demote " + std::to_string(r.target_bytes) + " bytes";
             r.preferred_tier = DomainType::PinnedHostMemory;
             dr.relief = r;

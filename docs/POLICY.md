@@ -120,7 +120,7 @@ These are recommendations. The runtime also produces a base action list per leve
 `PressureRuntime::set_policy(PressurePolicy)` applies a policy **atomically**:
 
 1. `validate_policy(p)` runs first. On failure it returns the problem description and leaves the previous policy in place -- an invalid policy is never published.
-2. On success, the per-domain `HysteresisState` instances are recreated from the new hysteresis config (under `refresh_mutex_`).
+2. On success, the per-domain `HysteresisState` instances adopt the new hysteresis config (under `refresh_mutex_`); each domain keeps its resolved level, and a pending transition starts over.
 3. The new policy is swapped into `policy_` as `shared_ptr<const PressurePolicy>`.
 4. `stats_.policy_changes` is bumped.
 

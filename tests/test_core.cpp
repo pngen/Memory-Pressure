@@ -3,6 +3,8 @@
 #include "memory_pressure/providers/synthetic.h"
 
 #include <limits>
+#include <memory>
+#include <vector>
 
 #include "memory_pressure/domain.h"
 #include "memory_pressure/events.h"
@@ -270,4 +272,159 @@ TEST(snapshot_rejects_duplicate_domains) {
     domains.push_back(d2);
     j["domains"] = domains;
     EXPECT(!snapshot_from_json(j).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Budgets, policy and level bookkeeping
+// ---------------------------------------------------------------------------
+namespace {
+// One accelerator domain that climbs and then holds at 98% of `total`.
+std::shared_ptr<SyntheticProvider> holding_provider(const PressureDomainId& id, std::uint64_t total) {
+    std::vector<SyntheticDomainSpec> ds;
+    SyntheticDomainSpec d; d.id = id; d.type = DomainType::AcceleratorMemory;
+    d.group = "gpu"; d.total_capacity = total; ds.push_back(d);
+    return std::make_shared<SyntheticProvider>(std::move(ds), SyntheticScenario::NoRecovery, 100, 4);
+}
+}
+
+TEST(budget_reserve_sum_does_not_wrap) {
+    // Reserves that add up past 2^64 are more than any capacity.  The total
+    // must not wrap around to a small number that validation then accepts.
+    Budget b;
+    b.hard_capacity = 1024;
+    Reserve r1; r1.bytes = 1ULL << 63;
+    Reserve r2; r2.bytes = 1ULL << 63;
+    b.reserves = {r1, r2};
+    EXPECT(b.reserve_bytes() == (std::numeric_limits<std::uint64_t>::max)());
+    EXPECT(b.usable_capacity() == 0);
+    EXPECT(validate_budget(b).has_value());
+    PressureRuntime rt;
+    EXPECT(rt.set_budget(PressureDomainId{40, 1}, b).has_value());
+}
+
+TEST(zero_usable_capacity_is_not_normal) {
+    // A budget whose reserves take the whole capacity leaves nothing usable.
+    // Bytes committed against it are over the ceiling, not "0% utilized".
+    const PressureDomainId id{41, 1};
+    PressureRuntime rt;
+    rt.register_provider(holding_provider(id, 1024ULL*1024*1024));
+    Budget b; b.hard_capacity = 64ULL*1024*1024; b.emergency_reserve_bytes = b.hard_capacity;
+    EXPECT(!rt.set_budget(id, b).has_value());
+    auto sn = rt.refresh(1000);
+    const DomainState* st = sn->find_domain(id);
+    EXPECT(st != nullptr);
+    if (st) {
+        EXPECT(st->usable_capacity == 0);
+        EXPECT(st->committed > 0);
+        EXPECT(st->level == PressureLevel::Exhausted);
+        EXPECT(st->utilization >= 1.0);
+        EXPECT(st->reserve_deficit_component == 1.0);
+        EXPECT(rt.admit(id, 1).decision == AdmissionDecision::Reject);
+    }
+}
+
+TEST(policy_validation_rejects_impossible_hysteresis) {
+    // Confirmations are counted up to max_debounce_observations and no further:
+    // a dwell above that cap can never be met.  Such a policy is refused rather
+    // than left to freeze every domain at its current level.
+    PressurePolicy p = default_policy();
+    p.hysteresis.min_dwell_observations = 6;
+    p.hysteresis.max_debounce_observations = 4;
+    EXPECT(validate_policy(p).has_value());
+    PressureRuntime rt;
+    EXPECT(rt.set_policy(p).has_value());
+    p.hysteresis.max_debounce_observations = 6;
+    EXPECT(!validate_policy(p).has_value());
+    EXPECT(!rt.set_policy(p).has_value());
+    // Durations that can never elapse are refused as well.
+    PressurePolicy q = default_policy();
+    q.hysteresis.recovery_delay_ms = std::numeric_limits<double>::quiet_NaN();
+    EXPECT(validate_policy(q).has_value());
+    q = default_policy();
+    q.hysteresis.escalation_delay_ms = -1.0;
+    EXPECT(validate_policy(q).has_value());
+}
+
+TEST(policy_change_keeps_resolved_levels) {
+    // Replacing the policy is not an observation.  A domain that is CRITICAL
+    // stays CRITICAL across the swap; it is not reported as recovered and then
+    // entered again, and work is not admitted in between.
+    const PressureDomainId id{42, 1};
+    PressureRuntime rt;
+    rt.register_provider(holding_provider(id, 1000ULL*1024*1024));
+    Budget b; b.hard_capacity = 1024ULL*1024*1024; rt.set_budget(id, b);   // holds at ~95.7%
+    for (int i = 0; i < 24; ++i) rt.refresh(1000 + i*100);
+    auto held = rt.current_snapshot();
+    const DomainState* before = held->find_domain(id);
+    EXPECT(before && before->level == PressureLevel::Critical);
+
+    auto sub = rt.subscribe(SubscriptionFilter{});
+    PressurePolicy p = default_policy(); p.version = 2;
+    EXPECT(!rt.set_policy(p).has_value());
+    auto sn = rt.refresh(1000 + 24*100);
+    EXPECT(sn->policy_version == 2);
+    const DomainState* after = sn->find_domain(id);
+    EXPECT(after != nullptr);
+    if (after) {
+        EXPECT(after->level == PressureLevel::Critical);
+        EXPECT(after->previous_level == PressureLevel::Critical);
+        EXPECT(rt.admit(id, 1).decision == AdmissionDecision::Reject);
+    }
+    bool flapped = false;
+    PressureEvent e;
+    while (sub->try_pop(e)) {
+        if (e.type == PressureEventType::PressureRecovered || e.type == PressureEventType::PressureEntered) flapped = true;
+    }
+    EXPECT(!flapped);
+}
+
+TEST(relief_is_bounded_by_policy) {
+    // max_relief_bytes caps what a single relief request may ask for.
+    const PressureDomainId id{43, 1};
+    PressureRuntime rt;
+    rt.register_provider(holding_provider(id, 1000ULL*1024*1024));
+    Budget b; b.hard_capacity = 1024ULL*1024*1024; rt.set_budget(id, b);
+    PressurePolicy p = default_policy(); p.max_relief_bytes = 1ULL*1024*1024;
+    EXPECT(!rt.set_policy(p).has_value());
+    for (int i = 0; i < 24; ++i) rt.refresh(1000 + i*100);
+    DomainResponse dr = rt.response_for(id);
+    EXPECT(dr.level == PressureLevel::Critical);
+    EXPECT(dr.relief.has_value());
+    if (dr.relief) {
+        EXPECT(dr.relief->target_bytes == 1ULL*1024*1024);   // not a quarter of the capacity
+        EXPECT(dr.relief->minimum_useful_relief <= dr.relief->target_bytes);
+    }
+}
+
+TEST(closed_subscription_is_released) {
+    // The runtime does not keep a subscription once it has been closed.
+    const PressureDomainId id{44, 1};
+    PressureRuntime rt;
+    rt.register_provider(holding_provider(id, 1024ULL*1024*1024));
+    std::weak_ptr<Subscription> through_runtime;
+    {
+        auto sub = rt.subscribe(SubscriptionFilter{});
+        through_runtime = sub;
+        rt.close_subscription(sub);
+    }
+    EXPECT(through_runtime.expired());
+    // One that was closed directly is dropped with the next delivery.
+    std::weak_ptr<Subscription> directly;
+    {
+        auto sub = rt.subscribe(SubscriptionFilter{});
+        directly = sub;
+        sub->close();
+    }
+    rt.refresh(1000);
+    EXPECT(directly.expired());
+}
+
+TEST(scoring_ignores_negative_failure_counts) {
+    // Score components are normalized to [0,1]: a negative failure count is
+    // not a credit against the other components.
+    const ScoreWeights w;
+    const PressureScore negative = score_domain(0.5, true, 0.5, 0.0, 0.0, -50, Confidence::Authoritative, Validity::Valid, w);
+    const PressureScore none = score_domain(0.5, true, 0.5, 0.0, 0.0, 0, Confidence::Authoritative, Validity::Valid, w);
+    EXPECT(negative.allocation_failure_component == 0.0);
+    EXPECT(negative.value == none.value);
 }

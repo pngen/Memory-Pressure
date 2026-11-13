@@ -1,6 +1,11 @@
 #include "test_harness.h"
 #include "memory_pressure/runtime.h"
+#include "memory_pressure/serialize.h"
 #include "memory_pressure/providers/synthetic.h"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 using namespace memory_pressure;
 
@@ -61,4 +66,93 @@ TEST(failure_stale_telemetry_not_trusted_forever) {
         if (s->stale_data) ever_stale = true;
     }
     EXPECT(ever_stale);   // stale telemetry is no longer silently trusted
+}
+
+namespace {
+// A provider that reports healthy and returns exactly the observations it was given.
+class FixedProvider : public Provider {
+public:
+    FixedProvider(std::string name, std::vector<DomainObservation> observations)
+        : name_(std::move(name)), observations_(std::move(observations)) {}
+    std::string name() const noexcept override { return name_; }
+    bool supported() const noexcept override { return true; }
+    ProviderSample sample(std::uint64_t now_ms) override {
+        ProviderSample s;
+        s.status = ProviderStatus::Healthy;
+        s.sampled_at_ms = now_ms;
+        s.observations = observations_;
+        return s;
+    }
+private:
+    std::string name_;
+    std::vector<DomainObservation> observations_;
+};
+
+DomainObservation observed(const PressureDomainId& id, std::uint64_t total, std::uint64_t committed,
+                           std::uint64_t observed_at_ms) {
+    DomainObservation o;
+    o.id = id; o.type = DomainType::AcceleratorMemory; o.provider = "fixed";
+    o.total_capacity = total; o.committed = committed; o.available = total - committed;
+    o.confidence = Confidence::High; o.provenance = Provenance::SyntheticInput; o.validity = Validity::Valid;
+    o.observed_at_ms = observed_at_ms;
+    return o;
+}
+}
+
+TEST(failure_policy_freshness_bound_is_applied) {
+    // The provider reports healthy, but what it reports was observed a minute
+    // ago.  The policy allows ten seconds: the data is stale and is marked so.
+    const PressureDomainId id{50, 1};
+    PressureRuntime rt;
+    rt.register_provider(std::make_shared<FixedProvider>("fixed",
+        std::vector<DomainObservation>{observed(id, 1000, 100, 40'000)}));
+    auto sn = rt.refresh(100'000);
+    EXPECT(sn->stale_data);
+    const DomainState* st = sn->find_domain(id);
+    EXPECT(st != nullptr);
+    if (st) {
+        EXPECT(st->validity == Validity::Stale);
+        EXPECT(st->confidence == Confidence::Low);
+    }
+    const auto health = sn->provider_health.find("fixed");
+    EXPECT(health != sn->provider_health.end() && health->second == ProviderStatus::Stale);
+    EXPECT(rt.stats().stale_observations == 1);
+
+    // A per-provider bound that covers the age makes the same data fresh.
+    PressureRuntime lenient;
+    PressurePolicy p = default_policy();
+    p.freshness.per_provider_max_age_us["fixed"] = 120ULL * 1000 * 1000;
+    EXPECT(!lenient.set_policy(p).has_value());
+    lenient.register_provider(std::make_shared<FixedProvider>("fixed",
+        std::vector<DomainObservation>{observed(id, 1000, 100, 40'000)}));
+    auto fresh = lenient.refresh(100'000);
+    EXPECT(!fresh->stale_data);
+    const DomainState* fs = fresh->find_domain(id);
+    EXPECT(fs && fs->validity == Validity::Valid && fs->confidence == Confidence::High);
+}
+
+TEST(failure_repeated_domain_is_interpreted_once) {
+    // A provider that lists the same domain twice gets one entry in the
+    // snapshot, and the repeat does not count as a second confirmation.
+    const PressureDomainId id{51, 1};
+    PressureRuntime rt;
+    rt.register_provider(std::make_shared<FixedProvider>("fixed",
+        std::vector<DomainObservation>{observed(id, 1000, 950, 0), observed(id, 1000, 950, 0)}));
+    auto sn = rt.refresh(1000);
+    EXPECT(sn->domains.size() == 1);
+    EXPECT(!sn->warnings.empty());
+    const DomainState* st = sn->find_domain(id);
+    // 95% is CRITICAL territory, but one refresh is one observation: with the
+    // default dwell of two the level is not confirmed yet.
+    EXPECT(st && st->level == PressureLevel::Normal && st->in_hysteresis_hold);
+    // What the runtime produced can be read back (domain ids are unique).
+    auto text = json_serialize(snapshot_to_json(*sn));
+    EXPECT(text.has_value());
+    if (text) {
+        auto parsed = json_parse(*text);
+        EXPECT(parsed && snapshot_from_json(*parsed).has_value());
+    }
+    auto next = rt.refresh(1100);
+    const DomainState* st2 = next->find_domain(id);
+    EXPECT(st2 && st2->level == PressureLevel::Critical);
 }

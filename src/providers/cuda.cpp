@@ -62,7 +62,8 @@ HMODULE find_cudart() {
         std::error_code ec;
         for (auto it = std::filesystem::directory_iterator(base, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
             if (!it->is_directory()) continue;
-            for (const auto& sub : { L"bin", L"bin\x64" }) {
+            // "bin\\x64" needs the doubled backslash: "\x64" is the letter 'd'.
+            for (const auto& sub : { L"bin", L"bin\\x64" }) {
                 auto bin = it->path() / sub;
                 std::error_code ec2;
                 for (auto f = std::filesystem::directory_iterator(bin, ec2); !ec2 && f != std::filesystem::directory_iterator(); f.increment(ec2)) {
@@ -109,6 +110,7 @@ struct CudaDeviceProvider::Impl {
     // per-device totals on WDDM where the driver cuMemGetInfo may be capped.
     void* cudart = nullptr;
     int (*cudaSetDeviceFn)(int) = nullptr;
+    int (*cudaGetDeviceFn)(int*) = nullptr;
     int (*cudaGetDeviceCountFn)(int*) = nullptr;
     int (*cudaMemGetInfoFn)(std::uint64_t*, std::uint64_t*) = nullptr;
     int (*cudaMallocFn)(void**, std::uint64_t) = nullptr;
@@ -128,6 +130,7 @@ CudaDeviceProvider::CudaDeviceProvider(bool enable_probes)
 #endif
     if (impl_->cudart) {
         impl_->cudaSetDeviceFn = reinterpret_cast<int(*)(int)>(load_symbol(impl_->cudart, "cudaSetDevice"));
+        impl_->cudaGetDeviceFn = reinterpret_cast<int(*)(int*)>(load_symbol(impl_->cudart, "cudaGetDevice"));
         impl_->cudaGetDeviceCountFn = reinterpret_cast<int(*)(int*)>(load_symbol(impl_->cudart, "cudaGetDeviceCount"));
         impl_->cudaMemGetInfoFn = reinterpret_cast<int(*)(std::uint64_t*, std::uint64_t*)>(load_symbol(impl_->cudart, "cudaMemGetInfo"));
         impl_->cudaMallocFn = reinterpret_cast<int(*)(void**, std::uint64_t)>(load_symbol(impl_->cudart, "cudaMalloc"));
@@ -184,6 +187,12 @@ ProviderSample CudaDeviceProvider::sample(std::uint64_t now_ms) {
     }
     out.status = ProviderStatus::Healthy;
 
+    // Sampling selects each device in turn on the calling thread.  The device
+    // the caller had selected is put back afterwards: reading telemetry must
+    // not change where the caller's next allocation goes.
+    int caller_device = -1;
+    if (impl_->cudart && impl_->cudaGetDeviceFn && impl_->cudaGetDeviceFn(&caller_device) != 0) caller_device = -1;
+
     for (int i = 0; i < impl_->device_count; ++i) {
         // Identity from the driver API where available.  The device handle is
         // fetched via the API (ordinal != handle is not guaranteed).
@@ -227,19 +236,26 @@ ProviderSample CudaDeviceProvider::sample(std::uint64_t now_ms) {
         o.observed_at_ms = now_ms;
         out.observations.push_back(std::move(o));
     }
+    if (caller_device >= 0 && impl_->cudaSetDeviceFn) impl_->cudaSetDeviceFn(caller_device);
     return out;
 }
 
 bool CudaDeviceProvider::probe_device(int ordinal, std::uint64_t bytes) {
+    // Probes allocate on the device, so they only run when the provider was
+    // created with probes enabled.
+    if (!impl_->probes_enabled) return false;
     if (!supported() || !impl_->cudart) return false;
     if (ordinal < 0 || ordinal >= impl_->device_count) return false;
+    int caller_device = -1;
+    if (impl_->cudaGetDeviceFn && impl_->cudaGetDeviceFn(&caller_device) != 0) caller_device = -1;
     if (impl_->cudaSetDeviceFn && impl_->cudaSetDeviceFn(ordinal) != 0) return false;
+    bool ok = false;
     void* ptr = nullptr;
     if (impl_->cudaMallocFn && impl_->cudaMallocFn(&ptr, bytes) == 0) {
-        const bool ok = impl_->cudaFreeFn && impl_->cudaFreeFn(ptr) == 0;
-        return ok;
+        ok = impl_->cudaFreeFn && impl_->cudaFreeFn(ptr) == 0;
     }
-    return false;
+    if (caller_device >= 0 && impl_->cudaSetDeviceFn) impl_->cudaSetDeviceFn(caller_device);
+    return ok;
 }
 
 } // namespace memory_pressure

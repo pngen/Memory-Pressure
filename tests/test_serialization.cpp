@@ -135,3 +135,32 @@ TEST(json_serialize_string_escaping) {
         if (back) EXPECT(back->as_string() == std::string("a \"b\" \\ c\n"));
     }
 }
+
+TEST(provider_status_partial_survives_serialization) {
+    // PARTIAL is its own provider status; it is not written as UNAVAILABLE.
+    EXPECT(std::string(to_string(ProviderStatus::Partial)) == "PARTIAL");
+    Snapshot s;
+    s.provider_health["windows"] = ProviderStatus::Partial;
+    s.provider_health["cuda.driver"] = ProviderStatus::Unavailable;
+    auto back = snapshot_from_json(snapshot_to_json(s));
+    EXPECT(back.has_value());
+    if (back) {
+        EXPECT(back->provider_health["windows"] == ProviderStatus::Partial);
+        EXPECT(back->provider_health["cuda.driver"] == ProviderStatus::Unavailable);
+    }
+}
+
+TEST(json_integers_at_the_int64_boundary) {
+    // 2^63 is not an int64.  It is written as the positive number it is, and
+    // the int64 view of it reports "does not fit" instead of a wrapped value.
+    const Json big(static_cast<std::uint64_t>(1) << 63);
+    auto text = json_serialize(big);
+    EXPECT(text.has_value());
+    if (text) {
+        auto back = json_parse(*text);
+        EXPECT(back.has_value());
+        if (back) EXPECT(back->as_number() == 9223372036854775808.0);
+    }
+    EXPECT(!big.as_int64().has_value());
+    EXPECT(Json(static_cast<std::int64_t>(-5)).as_int64() == std::optional<std::int64_t>(-5));
+}

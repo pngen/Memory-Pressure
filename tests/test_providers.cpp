@@ -126,3 +126,10 @@ TEST(synthetic_provider_failure_honest) {
     auto s5 = p.sample(1400);
     EXPECT(s5.status == ProviderStatus::Failed);
 }
+
+TEST(cuda_probe_requires_enabling) {
+    // A probe allocates device memory.  A provider that was created without
+    // probes enabled (the default) does not perform one.
+    CudaDeviceProvider p;
+    EXPECT(!p.probe_device(0, 1ULL * 1024 * 1024));
+}

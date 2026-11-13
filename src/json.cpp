@@ -253,8 +253,10 @@ void serialize_to(const Json& v, std::string& out, bool& finite_ok) {
             const double d = v.as_number().value_or(0.0);
             if (!std::isfinite(d)) { finite_ok = false; return; }
             char buf[64];
+            // 2^63 itself is not an int64 (the conversion of INT64_MAX to double
+            // rounds up to it), so the upper bound is exclusive.
             if (std::floor(d) == d && d >= static_cast<double>(std::numeric_limits<std::int64_t>::min())
-                && d <= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+                && d < 9223372036854775808.0) {
                 auto res = std::to_chars(buf, buf + sizeof(buf), static_cast<std::int64_t>(d));
                 out.append(buf, res.ptr);
             } else {
@@ -343,7 +345,7 @@ std::optional<std::int64_t> Json::as_int64() const noexcept {
     const double v = *d;
     if (!std::isfinite(v)) return std::nullopt;
     if (std::floor(v) != v) return std::nullopt;
-    if (v < static_cast<double>(std::numeric_limits<std::int64_t>::min()) || v > static_cast<double>(std::numeric_limits<std::int64_t>::max())) return std::nullopt;
+    if (v < static_cast<double>(std::numeric_limits<std::int64_t>::min()) || v >= 9223372036854775808.0) return std::nullopt;
     return static_cast<std::int64_t>(v);
 }
 std::optional<std::uint64_t> Json::as_uint64() const noexcept {
